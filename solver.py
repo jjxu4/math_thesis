@@ -1,21 +1,8 @@
 import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
 
-
-def create_initial_distribution(x_min, x_max, v_min, v_max, res_x, res_v):
-
-    # 1D grids
-    x = np.linspace(x_min, x_max, res_x)
-    v = np.linspace(v_min, v_max, res_v)
-
-    # Phase-space mesh
-    X, V = np.meshgrid(x, v)
-
-    # Initial distribution, hard coded
-    f0 = ((1.0 + 0.05 * np.cos(X))* np.exp(-V**2 / 2.0) / np.sqrt(2.0 * np.pi))
-
-    return x, v, X, V, f0
-
-def solve_vlasov_poisson(f0, x, v, T, t_res, H=None):
+def solve_vlasov_poisson(f0, x, v, T, t_res, H=None, returnEhist=False):
 
     times = np.linspace(0.0, T, t_res + 1)
     dt = times[1] - times[0]
@@ -24,12 +11,15 @@ def solve_vlasov_poisson(f0, x, v, T, t_res, H=None):
     if H is None:
         H = np.zeros_like(x)
 
-    f_history = np.zeros((t_res + 1, len(v), len(x)))
+    f_history = np.zeros((t_res + 1, len(v), len(x)))       # t_res + 1 grids, each grid has len(v) arrays, each with len(x) elements
 
-    f_history[0] = f0.copy()
+    f_history[0] = f0.copy()                # f0 should be a 2D array, first index representing velocity second index representing position
 
     # Current state
     f = f0.copy()
+    E_hist = np.zeros((t_res + 1, len(x)))
+    if returnEhist:
+        E_hist[0] = compute_E(f, x, v)
 
     for n in range(t_res):
         f_star = half_x_step(f, x, v, dt)
@@ -41,9 +31,69 @@ def solve_vlasov_poisson(f0, x, v, T, t_res, H=None):
         f = half_x_step(f_star_star, x, v, dt)
 
         f_history[n + 1] = f
+        if returnEhist:
+            E_hist[n + 1] = compute_E(f, x, v)
 
-    return times, f_history
+    to_return = (times, f_history)
+    if returnEhist == True:
+        to_return = (times, f_history, E_hist)
 
+    return to_return
+
+def plot_vp_solution(f0, x, v, T, t_res, H=None):
+
+    if H is None:
+        H = np.zeros_like(x)
+
+    times, f_history, E_hist = solve_vlasov_poisson(f0, x, v, T, t_res, H, returnEhist=True)
+    total_hist = E_hist + H
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    fig.subplots_adjust(left=0.08, right=0.68, bottom=0.30, top=0.90)
+
+    mesh = ax.pcolormesh(x, v, f_history[0], shading="auto", cmap="viridis", vmin=0.0, vmax=f_history.max())
+    ax.set_xlim(x[0], x[-1])
+    ax.set_ylim(v[0], v[-1])
+    ax.set_xlabel("x")
+    ax.set_ylabel("v")
+    ax.set_title(f"t = {times[0]:.1f}")
+
+    colorbar_ax = fig.add_axes([0.08, 0.12, 0.60, 0.035])
+    fig.colorbar(mesh, cax=colorbar_ax, orientation="horizontal", label="f(x, v)")
+
+    ax_E = ax.twinx()
+    ax_H = ax.twinx()
+    ax_total = ax.twinx()
+
+    for axis, values, color, label, offset in [
+        (ax_E, E_hist, "tab:blue", "E(x)", 0),
+        (ax_H, H, "tab:orange", "H(x)", 65),
+        (ax_total, total_hist, "tab:green", "E(x) + H(x)", 130),
+    ]:
+        axis.spines["right"].set_position(("outward", offset))
+        axis.spines["right"].set_color(color)
+        axis.set_ylabel(label, color=color)
+        axis.tick_params(axis="y", colors=color)
+        limit = np.max(np.abs(values))
+        if limit == 0.0:
+            limit = 1.0
+        axis.set_ylim(-1.1 * limit, 1.1 * limit)
+
+    line_E, = ax_E.plot(x, E_hist[0], color="tab:blue")
+    line_H, = ax_H.plot(x, H, color="tab:orange")
+    line_total, = ax_total.plot(x, total_hist[0], color="tab:green")
+
+    def update(frame):
+        mesh.set_array(f_history[frame].ravel())
+        line_E.set_ydata(E_hist[frame])
+        line_total.set_ydata(total_hist[frame])
+        ax.set_title(f"t = {times[frame]:.1f}")
+        return mesh, line_E, line_H, line_total
+
+    anim = FuncAnimation(fig, update, frames=len(times), interval=100)
+    plt.close(fig)
+    
+    return anim
 
 # Helpers
 def half_x_step(f, x, v, dt):
@@ -78,14 +128,14 @@ def compute_E(f_star, x, v):
     dv = v[1] - v[0]
     dx = x[1] - x[0]
 
-    rho = np.trapezoid(f_star, dx=dv, axis=0)
+    rho = dv * np.sum(f_star, axis=0)
     q = 1.0 - rho
 
     q_hat = np.fft.fft(q)
     E_hat = np.zeros_like(q_hat)
 
     k = 2.0 * np.pi * np.fft.fftfreq(len(x), d=dx)
-    nonzero_mask = k != 0.0
+    nonzero_mask = (k != 0.0)
 
     E_hat[nonzero_mask] = q_hat[nonzero_mask] / (1j * k[nonzero_mask])
     E = np.fft.ifft(E_hat).real
